@@ -1,4 +1,4 @@
-;;; derl.el --- Erlang distribution protocol implementation  -*- lexical-binding: t -*-
+;;; earl.el --- Erlang distribution protocol implementation  -*- lexical-binding: t -*-
 
 ;; Copyright (C) Axel Forsman
 
@@ -7,7 +7,7 @@
 ;; Version: 0.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: comm, extensions, languages, processes
-;; URL: https://github.com/axelf4/derl.el
+;; URL: https://github.com/axelf4/earl
 
 ;; This file is NOT part of GNU Emacs.
 
@@ -32,25 +32,25 @@
 ;; allowing Emacs to communicate with Erlang VMs as if it were another
 ;; Erlang node. This is achieved with an Erlang-like process runtime.
 
-;; New processes are created by providing `derl-spawn' with a
+;; New processes are created by providing `earl-spawn' with a
 ;; generator function (see the `generator' package) to run. Scheduling
 ;; is cooperative, not preemptive---processes must voluntarily give
-;; other processes the opportunity to run by calling `derl-yield' or
-;; `derl-receive'. Inter-process communication happens solely through
+;; other processes the opportunity to run by calling `earl-yield' or
+;; `earl-receive'. Inter-process communication happens solely through
 ;; asynchronous message passing. The following example (where "!" is a
-;; shorthand for `derl-send') illustrates spawning a process that
+;; shorthand for `earl-send') illustrates spawning a process that
 ;; replies once with the number it received plus one:
 
-;;     (let ((pid (derl-spawn
-;;                 (iter-make (derl-receive
+;;     (let ((pid (earl-spawn
+;;                 (iter-make (earl-receive
 ;;                             (`(,from . ,i) (! from (1+ i))))))))
-;;       (! pid (cons (derl-self) 5))
-;;       (derl-receive (i (message "Received %d!" i))))
+;;       (! pid (cons (earl-self) 5))
+;;       (earl-receive (i (message "Received %d!" i))))
 
 ;; Erlang terms in external term format, see
 ;; https://www.erlang.org/doc/apps/erts/erl_ext_dist.html, are
 ;; convertible to and from Emacs Lisp terms using the functions
-;; `derl-read' and `derl-write', as per the table below:
+;; `earl-read' and `earl-write', as per the table below:
 
 ;;     Erlang   <=>   Emacs Lisp
 ;;     ---------------------------------
@@ -61,7 +61,7 @@
 ;;     "foo"          (?f ?o ?o)
 ;;     <<"foo">>      "foo"
 
-;; where "EXT" denotes the value of `derl-tag'. In addition, integers;
+;; where "EXT" denotes the value of `earl-tag'. In addition, integers;
 ;; floats; and other atoms/symbols are converted to their respective
 ;; counterparts, and Erlang process identifiers and references are
 ;; translated to opaque ELisp objects. Bitstrings and ports are not
@@ -70,7 +70,7 @@
 ;; If a local Erlang VM was started with e.g. "erl -sname arnie", you
 ;; may connect to it and perform an RPC using:
 
-;;     (derl-do (derl-call (derl-rpc (intern (concat "arnie@" (system-name)))
+;;     (earl-do (earl-call (earl-rpc (intern (concat "arnie@" (system-name)))
 ;;                                   'erlang 'node ())))
 
 ;;; Code:
@@ -80,14 +80,14 @@
 (require 'generator)
 
 (eval-when-compile
-  (defmacro derl--read-uint (n)
+  (defmacro earl--read-uint (n)
     "Read N-byte network-endian unsigned integer."
     (cl-loop
      for i below n collect
      (let ((x `(char-after (+ p ,i))) (j (* 8 (- n i 1)))) (if (= j 0) x `(ash ,x ,j)))
      into xs finally return `(let ((p (point))) (forward-char ,n) (logior ,@xs))))
 
-  (defmacro derl--uint-string (n integer)
+  (defmacro earl--uint-string (n integer)
     (macroexp-let2 nil x integer
       (cl-loop
        for i below n with xs do
@@ -96,14 +96,14 @@
 
 ;;; Erlang Port Mapper Daemon (EPMD) interaction
 
-(defun derl-epmd-port-please (name host &optional callback)
+(defun earl-epmd-port-please (name host &optional callback)
   "Get the distribution port of the node NAME@HOST.
 If non-nil CALLBACK, return the network process and call CALLBACK
 asynchronously with the port, nil indicating an error. Otherwise,
 return the port in a blocking fashion."
   (if (null callback)
       (let* (result
-             (proc (derl-epmd-port-please name host (lambda (x) (setq result x)))))
+             (proc (earl-epmd-port-please name host (lambda (x) (setq result x)))))
         (while (accept-process-output proc))
         result)
     (let ((proc
@@ -135,24 +135,24 @@ return the port in a blocking fashion."
 ;; Unless messages are passed between connected nodes and a
 ;; distribution header is used the first byte should contain the
 ;; version number.
-(defconst derl-ext-version 131 "Erlang external term format version magic.")
+(defconst earl-ext-version 131 "Erlang external term format version magic.")
 
-(defconst derl-tag (make-symbol "EXT")
+(defconst earl-tag (make-symbol "EXT")
   "Marks the encompassing vector as a special Erlang term (i.e. not a tuple).")
 
-(defvar derl--connections (make-hash-table :test 'eq :weakness 'value)
+(defvar earl--connections (make-hash-table :test 'eq :weakness 'value)
   "Map from Erlang node names to connections.")
 
-(defun derl-read ()
+(defun earl-read ()
   "Read term encoded according to the Erlang external term format following point."
   (when (eq (char-after) 80) ; Compressed term
     (delete-char 5) ; Skip tag and uncompressed size
     (or (zlib-decompress-region (point) (point-max)) (signal 'compression-error ())))
   (cl-labels
-      ((read2 () (derl--read-uint 2))
-       (read4 () (derl--read-uint 4))
+      ((read2 () (earl--read-uint 2))
+       (read4 () (earl--read-uint 4))
        (internal-p (node creation)
-         (let ((conn (gethash node derl--connections)))
+         (let ((conn (gethash node earl--connections)))
            (and (eq node (process-get conn 'name))
                 (= creation (process-get conn 'creation))))))
     (forward-char)
@@ -165,22 +165,22 @@ return the port in a blocking fashion."
          (- (logand u #x7fffffff) (logand u #x80000000))))
 
       (88 ; NEW_PID_EXT
-       (let ((node (derl-read)) (id (read4)) (serial (read4)) (creation (read4)))
+       (let ((node (earl-read)) (id (read4)) (serial (read4)) (creation (read4)))
          (when (internal-p node creation) (setq node nil creation nil))
-         `[,derl-tag pid ,node ,id ,serial ,creation]))
+         `[,earl-tag pid ,node ,id ,serial ,creation]))
       ((or (and 104 (let n (progn (forward-char) (char-before)))) ; SMALL_TUPLE_EXT
            (and 105 (let n (read4)))) ; LARGE_TUPLE_EXT
-       (cl-loop repeat n collect (derl-read) into xs
+       (cl-loop repeat n collect (earl-read) into xs
                 finally return (apply #'vector xs)))
       (116 ; MAP_EXT
        (cl-loop with n = (read4) with x = (make-hash-table :test 'equal :size n)
-                repeat n do (puthash (derl-read) (derl-read) x) finally return x))
+                repeat n do (puthash (earl-read) (earl-read) x) finally return x))
       (106) ; NIL_EXT
       (107 ; STRING_EXT
        (cl-loop repeat (read2) collect (progn (forward-char) (char-before))))
       (108 ; LIST_EXT
-       (let ((xs (cl-loop repeat (read4) collect (derl-read))))
-         (setcdr (last xs) (derl-read))
+       (let ((xs (cl-loop repeat (read4) collect (earl-read))))
+         (setcdr (last xs) (earl-read))
          xs))
       (109 ; BINARY_EXT
        (let ((n (read4)))
@@ -194,10 +194,10 @@ return the port in a blocking fashion."
                 (forward-char)
                 finally return (if (= sign 0) x (- x))))
       (90 ; NEWER_REFERENCE_EXT
-       (let ((len (read2)) (node (derl-read)) (creation (read4)) (id 0))
+       (let ((len (read2)) (node (earl-read)) (creation (read4)) (id 0))
          (dotimes (_ len) (setq id (logior (ash id 32) (read4))))
          (when (internal-p node creation) (setq node nil creation nil))
-         `[,derl-tag reference ,node ,id ,creation]))
+         `[,earl-tag reference ,node ,id ,creation]))
 
       (70 ; NEW_FLOAT_EXT
        (let* ((x (read4))
@@ -213,14 +213,14 @@ return the port in a blocking fashion."
            (and 119 (let n (progn (forward-char) (char-before))))) ; SMALL_ATOM_UTF8_EXT
        (forward-char n)
        (or (intern (decode-coding-region (- (point) n) (point) 'utf-8 t))
-           `[,derl-tag nil]))
+           `[,earl-tag nil]))
       (tag (error "Unknown tag `%s'" tag)))))
 
-(defvar derl--write-connection)
-(put 'derl--write-connection 'variable-documentation
-     "The current connection during `derl-write'.")
+(defvar earl--write-connection)
+(put 'earl--write-connection 'variable-documentation
+     "The current connection during `earl-write'.")
 
-(defun derl-write (term)
+(defun earl-write (term)
   "Print TERM at point according to the Erlang external term format."
   (cl-labels
       ((write2 (i) (insert (logand (ash i -8) #xff) (logand i #xff)))
@@ -242,40 +242,40 @@ return the port in a blocking fashion."
                       (if (<= n #xff) (insert 110 n) ; SMALL_BIG_EXT
                         (insert 111) ; LARGE_BIG_EXT
                         (write4 n)))))))
-      (`[,(pred (eq derl-tag)) pid ,node ,id ,serial ,creation]
+      (`[,(pred (eq earl-tag)) pid ,node ,id ,serial ,creation]
        (unless node
-         (setq node (process-get derl--write-connection 'name)
-               creation (process-get derl--write-connection 'creation)))
+         (setq node (process-get earl--write-connection 'name)
+               creation (process-get earl--write-connection 'creation)))
        (insert 88) ; NEW_PID_EXT
-       (derl-write node)
+       (earl-write node)
        (write4 id)
        (write4 serial)
        (write4 creation))
-      (`[,(pred (eq derl-tag)) reference ,node ,id ,creation]
+      (`[,(pred (eq earl-tag)) reference ,node ,id ,creation]
        (unless node
-         (setq node (process-get derl--write-connection 'name)
-               creation (process-get derl--write-connection 'creation)))
+         (setq node (process-get earl--write-connection 'name)
+               creation (process-get earl--write-connection 'creation)))
        (insert 90) ; NEWER_REFERENCE_EXT
        (cl-loop with xs while (or (> id 0) (null xs)) do
                 (push (logand id #xffffffff) xs) (setq id (ash id -32)) finally
-                (write2 (length xs)) (derl-write node) (write4 creation)
+                (write2 (length xs)) (earl-write node) (write4 creation)
                 (dolist (x xs) (write4 x))))
-      (`[,(pred (eq derl-tag)) nil] (derl-write (eval-when-compile (make-symbol "nil"))))
+      (`[,(pred (eq earl-tag)) nil] (earl-write (eval-when-compile (make-symbol "nil"))))
       ((pred vectorp)
        (if (<= (length term) #xff) (insert 104 (length term)) ; SMALL_TUPLE_EXT
          (insert 105) ; LARGE_TUPLE_EXT
          (write4 (length term)))
-       (cl-loop for x across term do (derl-write x)))
+       (cl-loop for x across term do (earl-write x)))
       ((pred hash-table-p)
        (insert 116) ; MAP_EXT
        (write4 (hash-table-count term))
-       (maphash (lambda (k v) (derl-write k) (derl-write v)) term))
+       (maphash (lambda (k v) (earl-write k) (earl-write v)) term))
       ('nil (insert 106)) ; NIL_EXT
       ((pred consp) ; TODO Use STRING_EXT if possible
        (insert 108) ; LIST_EXT
        (let ((sp (point)) (n 1))
-         (while (progn (derl-write (pop term)) (consp term)) (setq n (1+ n)))
-         (derl-write term)
+         (while (progn (earl-write (pop term)) (consp term)) (setq n (1+ n)))
+         (earl-write term)
          (save-excursion (goto-char sp) (write4 n))))
       ((pred stringp)
        (insert 109) ; BINARY_EXT
@@ -307,95 +307,95 @@ return the port in a blocking fashion."
 
 ;;; Erlang-like processes
 
-(cl-defstruct (derl--process (:type vector) (:constructor nil)
+(cl-defstruct (earl--process (:type vector) (:constructor nil)
                              (:copier nil) (:predicate nil))
   (id (:read-only t)) (function (:read-only t)) mailbox blocked
   (links (:documentation "List of (PID . UNLINK-ID) pairs for each linked process.")))
 
 ;; Process-local variables
-(defvar derl--self [0 nil () nil ()] "The current `derl--process'.")
-(defvar derl--mailbox ()
+(defvar earl--self [0 nil () nil ()] "The current `earl--process'.")
+(defvar earl--mailbox ()
   "Local chronological order mailbox of the current process.")
 
-(defvar derl--processes
+(defvar earl--processes
   (let ((table (make-hash-table)))
-    (puthash (derl--process-id derl--self) derl--self table)
+    (puthash (earl--process-id earl--self) earl--self table)
     table)
   "Map of PID:s to processes.")
-(defvar derl--registry (make-hash-table :test 'eq) "Process registry.")
-(defvar derl--next-pid 0)
-(defvar derl--next-ref 0)
+(defvar earl--registry (make-hash-table :test 'eq) "Process registry.")
+(defvar earl--next-pid 0)
+(defvar earl--next-ref 0)
 
-(defun derl-self ()
+(defun earl-self ()
   "Return the process identifier of the calling process."
-  `[,derl-tag pid nil ,(derl--process-id derl--self) 0 nil])
+  `[,earl-tag pid nil ,(earl--process-id earl--self) 0 nil])
 
-(defun derl-make-ref ()
+(defun earl-make-ref ()
   "Return a unique reference."
-  (let ((id derl--next-ref))
-    (when (> (ash (cl-incf derl--next-ref) (* -5 32)) 0) (setq derl--next-ref 0))
-    `[,derl-tag reference nil ,id nil]))
+  (let ((id earl--next-ref))
+    (when (> (ash (cl-incf earl--next-ref) (* -5 32)) 0) (setq earl--next-ref 0))
+    `[,earl-tag reference nil ,id nil]))
 
-(defun derl-register (name pid)
+(defun earl-register (name pid)
   "Register a symbol NAME with PID in the name registry."
-  (if (null pid) (remhash name derl--registry)
-    (pcase-let ((`[,_ pid nil ,id ,_ ,_] pid)) (puthash name id derl--registry))))
+  (if (null pid) (remhash name earl--registry)
+    (pcase-let ((`[,_ pid nil ,id ,_ ,_] pid)) (puthash name id earl--registry))))
 
-(defun derl-whereis (name)
+(defun earl-whereis (name)
   "Return the process identifier with the registered NAME, or nil if none exists."
-  (let ((id (gethash name derl--registry)))
-    (and id (gethash id derl--processes) `[,derl-tag pid nil ,id 0 nil])))
+  (let ((id (gethash name earl--registry)))
+    (and id (gethash id earl--processes) `[,earl-tag pid nil ,id 0 nil])))
 
-(defvar derl--waiting nil)
-(defvar derl--scheduler-timer nil)
-(defun derl--schedule (&optional force)
-  (if (and force derl--waiting) (throw 'derl--wake nil)
-    (unless derl--scheduler-timer
-      (setq derl--scheduler-timer (run-with-idle-timer 0 nil #'derl--run)))))
+(defvar earl--waiting nil)
+(defvar earl--scheduler-timer nil)
+(defun earl--schedule (&optional force)
+  (if (and force earl--waiting) (throw 'earl--wake nil)
+    (unless earl--scheduler-timer
+      (setq earl--scheduler-timer (run-with-idle-timer 0 nil #'earl--run)))))
 
-(defun derl--run ()
-  (setq derl--scheduler-timer nil)
-  (when (derl--process-function derl--self) (error "Scheduling from inferior process"))
+(defun earl--run ()
+  (setq earl--scheduler-timer nil)
+  (when (earl--process-function earl--self) (error "Scheduling from inferior process"))
   (while (let* ((schedulable
-                 (cl-loop for p being the hash-values of derl--processes
-                          unless (derl--process-blocked p) collect p))
+                 (cl-loop for p being the hash-values of earl--processes
+                          unless (earl--process-blocked p) collect p))
                 (proc (and schedulable (nth (random (length schedulable)) schedulable))))
            (cond
-            (derl--waiting nil)
+            (earl--waiting nil)
             ((null proc) ; Blocked on externalities
-             (let ((derl--waiting t))
-               (catch 'derl--wake (accept-process-output nil 30)) t))
-            ((eq proc derl--self) ; Pass control back to main process
-             (when (cdr schedulable) (derl--schedule) nil))
-            (t (let ((id (derl--process-id proc)) (derl--self proc))
-                 (condition-case err (funcall (derl--process-function proc) :next nil)
-                   (iter-end-of-sequence (remhash id derl--processes)
-                                         (derl--propagate-exit 'normal))
-                   (t (remhash id derl--processes)
-                      (when (eq (car err) 'derl--exit-signal) (setq err (cdr err)))
+             (let ((earl--waiting t))
+               (catch 'earl--wake (accept-process-output nil 30)) t))
+            ((eq proc earl--self) ; Pass control back to main process
+             (when (cdr schedulable) (earl--schedule) nil))
+            (t (let ((id (earl--process-id proc)) (earl--self proc))
+                 (condition-case err (funcall (earl--process-function proc) :next nil)
+                   (iter-end-of-sequence (remhash id earl--processes)
+                                         (earl--propagate-exit 'normal))
+                   (t (remhash id earl--processes)
+                      (when (eq (car err) 'earl--exit-signal) (setq err (cdr err)))
                       (message "Process %d exited with: %S" id err)
-                      (derl--propagate-exit err))))
+                      (earl--propagate-exit err))))
                t)))))
 
-(defun derl-spawn (fun)
+(defun earl-spawn (fun)
   "Return the process identifier of a new process started by delegating to FUN.
 FUN should be a generator."
-  (let* ((id (cl-incf derl--next-pid)) m
+  (let* ((id (cl-incf earl--next-pid)) m
          (f (lambda (op value)
-              (let ((derl--mailbox m)) (funcall fun op value) (setq m derl--mailbox)))))
-    (puthash id (vector id f () nil ()) derl--processes)
-    (derl--schedule)
-    `[,derl-tag pid nil ,id 0 nil]))
+              (let ((earl--mailbox m)) (funcall fun op value) (setq m earl--mailbox)))))
+    (puthash id (vector id f () nil ()) earl--processes)
+    (earl--schedule)
+    `[,earl-tag pid nil ,id 0 nil]))
 
-(defun derl-spawn-link (fun)
-  "Like `derl-spawn' but link the calling process and the new process."
-  (let ((pid (derl-spawn fun))) (derl-link pid) pid))
+(defun earl-spawn-link (fun)
+  "Like `earl-spawn' but link the calling process and the new process."
+  (let ((pid (earl-spawn fun))) (earl-link pid) pid))
 
-(cl-defmacro derl-yield (&environment env)
+(cl-defmacro earl-yield (&environment env)
   "Try to give other processes a chance to execute before returning."
-  (if (assq 'iter-yield env) '(iter-yield nil) '(derl--run)))
+  (if (assq 'iter-yield env) '(iter-yield nil) '(earl--run)))
 
-(cl-defmacro derl-receive
+(cl-defmacro earl-receive
     (&rest arms &aux (cell (make-symbol "cell")) (prev (make-symbol "prev"))
            (result (make-symbol "result")) (continue (make-symbol "continue"))
            (timer (make-symbol "timer")) timeout on-timeout)
@@ -411,110 +411,110 @@ SECS, then TIMEOUT-FORM is evaluated instead.
     ,@(when timeout
         (cl-assert lexical-binding)
         `(with ,timer initially
-               (let ((f (lambda (p) (setf (derl--process-blocked p) nil ,timer nil)
-                          (derl--schedule t))))
-                 (setq ,timer (run-with-timer ,timeout nil f derl--self)))))
+               (let ((f (lambda (p) (setf (earl--process-blocked p) nil ,timer nil)
+                          (earl--schedule t))))
+                 (setq ,timer (run-with-timer ,timeout nil f earl--self)))))
     for ,cell =
-    (or (if ,cell (cdr ,cell) derl--mailbox)
-        (while (null (derl--process-mailbox derl--self))
-          (cl-letf (((derl--process-blocked derl--self) t))
+    (or (if ,cell (cdr ,cell) earl--mailbox)
+        (while (null (earl--process-mailbox earl--self))
+          (cl-letf (((earl--process-blocked earl--self) t))
             ,@(when timeout `((unless ,timer (cl-return ,on-timeout))))
-            (derl-yield)))
-        (let ((xs (nreverse (derl--process-mailbox derl--self))))
-          (setf (derl--process-mailbox derl--self) ()
-                (if ,cell (cdr ,cell) derl--mailbox) xs)))
+            (earl-yield)))
+        (let ((xs (nreverse (earl--process-mailbox earl--self))))
+          (setf (earl--process-mailbox earl--self) ()
+                (if ,cell (cdr ,cell) earl--mailbox) xs)))
     and ,prev = ,cell with ,result while
     (let ((,continue nil))
       (setq ,result ,(let* ((x (gensym "_"))
                             (pcase--dontwarn-upats (cons x pcase--dontwarn-upats)))
                        (pcase--expand `(car ,cell) `(,@arms (,x (setq ,continue t))))))
       ,continue)
-    finally (if ,prev (setcdr ,prev (cdr ,cell)) (pop derl--mailbox))
+    finally (if ,prev (setcdr ,prev (cdr ,cell)) (pop earl--mailbox))
     ,@(when timeout `((when ,timer (cancel-timer ,timer)))) finally return ,result))
 
-(defun derl-send (dest msg)
+(defun earl-send (dest msg)
   "Send MSG to DEST and return MSG.
 DEST can be a remote or local process identifier, a locally registered
 name, or a tuple \(REG-NAME . NODE) for a name at another node."
   (when-let
       ((id (pcase-exhaustive dest
              (`[,_ pid nil ,id ,_ ,_] id)
-             ((pred symbolp) (gethash dest derl--registry))
+             ((pred symbolp) (gethash dest earl--registry))
              ((or (and `(,name . ,node)
-                       (let ctl `[6 ,(derl-self) nil ,name])) ; REG_SEND
+                       (let ctl `[6 ,(earl-self) nil ,name])) ; REG_SEND
                   (and `[,_ pid ,node ,_ ,_ ,_]
-                       (let ctl `[22 ,(derl-self) ,dest]))) ; SEND_SENDER
-              (when-let (conn (derl--ensure-connection node))
+                       (let ctl `[22 ,(earl-self) ,dest]))) ; SEND_SENDER
+              (when-let (conn (earl--ensure-connection node))
                 (if (and name (eq node (process-get conn 'name)))
-                    (gethash name derl--registry)
-                  (derl--send-control-msg conn ctl msg) nil)))))
-       (process (gethash id derl--processes)))
-    (push msg (derl--process-mailbox process))
-    (setf (derl--process-blocked process) nil)
-    (derl--schedule))
+                    (gethash name earl--registry)
+                  (earl--send-control-msg conn ctl msg) nil)))))
+       (process (gethash id earl--processes)))
+    (push msg (earl--process-mailbox process))
+    (setf (earl--process-blocked process) nil)
+    (earl--schedule))
   msg)
 
-(defun derl-exit (pid reason &optional link from)
+(defun earl-exit (pid reason &optional link from)
   "Send an exit signal with exit REASON to the process identified by PID.
 LINK is non-nil if the exit signal was due to a link."
   (pcase-let ((`[,_ pid ,node ,id ,_ ,_] pid))
-    (if node (when-let (conn (derl--ensure-connection node))
-               (derl--send-control-msg conn `[8 ,(derl-self) ,pid ,reason])) ; EXIT2
-      (when-let (process (gethash id derl--processes))
+    (if node (when-let (conn (earl--ensure-connection node))
+               (earl--send-control-msg conn `[8 ,(earl-self) ,pid ,reason])) ; EXIT2
+      (when-let (process (gethash id earl--processes))
         (cond
-         ((and link (if-let (x (assoc (or from (derl-self)) (derl--process-links process)))
+         ((and link (if-let (x (assoc (or from (earl-self)) (earl--process-links process)))
                         (cdr x) t)))
          ((and (eq reason 'normal)
-               (not (if from (equal pid from) (eq process derl--self)))))
-         ((derl--process-function process)
-          (if (eq process derl--self)
-              (signal (if (eq reason 'normal) 'iter-end-of-sequence 'derl--exit-signal)
+               (not (if from (equal pid from) (eq process earl--self)))))
+         ((earl--process-function process)
+          (if (eq process earl--self)
+              (signal (if (eq reason 'normal) 'iter-end-of-sequence 'earl--exit-signal)
                       reason)
-            (remhash id derl--processes)
+            (remhash id earl--processes)
             (and (not link) (eq reason 'kill) (setq reason 'killed))
             (or (eq reason 'normal) (message "Process %d exited with: %S" id reason))
-            (let ((derl--self process))
-              (unwind-protect (funcall (derl--process-function process) :close nil)
-                (derl--propagate-exit reason)))))
+            (let ((earl--self process))
+              (unwind-protect (funcall (earl--process-function process) :close nil)
+                (earl--propagate-exit reason)))))
          ((eq reason 'normal) (signal 'quit nil))
          ((and (not link) (eq reason 'kill)) (kill-emacs))
          (t (message "Main process received exit signal: %S" reason)))))))
 
-(defun derl--propagate-exit (reason)
-  (pcase-dolist (`(,pid . ,unlink-id) (derl--process-links derl--self))
-    (unless unlink-id (derl-exit pid reason t))))
+(defun earl--propagate-exit (reason)
+  (pcase-dolist (`(,pid . ,unlink-id) (earl--process-links earl--self))
+    (unless unlink-id (earl-exit pid reason t))))
 
-(defun derl-link (pid)
+(defun earl-link (pid)
   "Set up a link between the calling process and another process identified by PID."
-  (when (if-let (link (assoc pid (derl--process-links derl--self)))
+  (when (if-let (link (assoc pid (earl--process-links earl--self)))
             (prog1 (cdr link) (setcdr link nil)) ; Clear outstanding unlink id
-          (push (list pid) (derl--process-links derl--self)))
+          (push (list pid) (earl--process-links earl--self)))
     (pcase-let ((`[,_ pid ,node ,id ,_ ,_] pid))
-      (if node (when-let (conn (derl--ensure-connection node))
-                 (derl--send-control-msg conn `[1 ,(derl-self) ,pid])) ; LINK
-        (when-let (process (gethash id derl--processes))
+      (if node (when-let (conn (earl--ensure-connection node))
+                 (earl--send-control-msg conn `[1 ,(earl-self) ,pid])) ; LINK
+        (when-let (process (gethash id earl--processes))
           ;; Unlinking would have been atomic for internal processes
-          (push (list (derl-self)) (derl--process-links process)))))))
+          (push (list (earl-self)) (earl--process-links process)))))))
 
-(defun derl-unlink (pid)
+(defun earl-unlink (pid)
   "Remove a link between the calling process and another process identified by PID."
   (pcase-let ((`[,_ pid ,node ,id ,_ ,_] pid))
     (if node
-        (when-let ((link (assoc pid (derl--process-links derl--self))) ((null (cdr link)))
-                   (conn (derl--ensure-connection node)))
+        (when-let ((link (assoc pid (earl--process-links earl--self))) ((null (cdr link)))
+                   (conn (earl--ensure-connection node)))
           (let ((unlink-id (setcdr link (1+ (random (1- (ash 1 64)))))))
-            (derl--send-control-msg conn `[35 ,unlink-id ,(derl-self) ,pid]))) ; UNLINK_ID
-      (cl-callf2 assoc-delete-all pid (derl--process-links derl--self))
-      (when-let (process (gethash id derl--processes))
-        (cl-callf2 assoc-delete-all (derl-self) (derl--process-links process))))))
+            (earl--send-control-msg conn `[35 ,unlink-id ,(earl-self) ,pid]))) ; UNLINK_ID
+      (cl-callf2 assoc-delete-all pid (earl--process-links earl--self))
+      (when-let (process (gethash id earl--processes))
+        (cl-callf2 assoc-delete-all (earl-self) (earl--process-links process))))))
 
 ;;; Erlang Distribution Protocol
 
-(defun derl--gen-digest (challenge cookie)
+(defun earl--gen-digest (challenge cookie)
   "Generate a message digest (the \"gen_digest()\" function)."
   (secure-hash 'md5 (concat cookie (number-to-string challenge)) nil nil t))
 
-(cl-defun derl-connect (host port cookie &key callback)
+(cl-defun earl-connect (host port cookie &key callback)
   "Connect to the node at HOST:PORT using COOKIE and return the network process.
 Non-nil unary CALLBACK will be called once after the connection
 handshake with a non-nil argument indicating success."
@@ -525,10 +525,10 @@ handshake with a non-nil argument indicating success."
          (forward-char)
          (cond
           ((looking-at-p "named:") (forward-char 6)
-           (let* ((nlen (derl--read-uint 2))
+           (let* ((nlen (earl--read-uint 2))
                   (name (progn (forward-char nlen)
                                (buffer-substring-no-properties (- (point) nlen) (point))))
-                  (creation (derl--read-uint 4)))
+                  (creation (earl--read-uint 4)))
              (set-process-plist
               proc (nconc (list 'name (intern name) 'creation creation)
                           (plist-put (process-plist proc) 'filter #'recv-challenge)))))
@@ -537,13 +537,13 @@ handshake with a non-nil argument indicating success."
        (recv-challenge (proc)
          (unless (eq (char-after) ?N) (err "Bad challenge")) ; recv_challenge_reply tag
          (forward-char 9)
-         (let* ((challenge-b (derl--read-uint 4))
-                (creation-b (derl--read-uint 4))
-                (nlen (derl--read-uint 2))
+         (let* ((challenge-b (earl--read-uint 4))
+                (creation-b (earl--read-uint 4))
+                (nlen (earl--read-uint 2))
                 (name-b (progn (forward-char nlen)
                                (buffer-substring-no-properties (- (point) nlen) (point))))
                 (challenge-a (random (ash 1 32))) ; #x100000000
-                (digest (derl--gen-digest challenge-b cookie)))
+                (digest (earl--gen-digest challenge-b cookie)))
            (set-process-plist
             proc (nconc (list 'name-b (intern name-b) 'creation-b creation-b
                               'challenge-a challenge-a)
@@ -551,19 +551,19 @@ handshake with a non-nil argument indicating success."
            (process-send-string
             proc (concat [0 21 ; Length
                             ?r] ; send_challenge_reply tag
-                         (derl--uint-string 4 challenge-a)
+                         (earl--uint-string 4 challenge-a)
                          digest))))
        (recv-challenge-ack (proc)
          (unless (eq (char-after) ?a) (err "Bad tag"))
          (let ((challenge-a (process-get proc 'challenge-a))
                (digest (buffer-substring-no-properties (1+ (point)) (+ (point) 1 16))))
            (forward-char 17)
-           (unless (string= (derl--gen-digest challenge-a cookie) digest)
+           (unless (string= (earl--gen-digest challenge-a cookie) digest)
              (err "Bad digest"))
            (message "Connected! (name: %s, creation: %d)"
                     (process-get proc 'name) (process-get proc 'creation))
-           (puthash (process-get proc 'name) proc derl--connections)
-           (puthash (process-get proc 'name-b) proc derl--connections)
+           (puthash (process-get proc 'name) proc earl--connections)
+           (puthash (process-get proc 'name-b) proc earl--connections)
            (process-put proc 'filter #'connected)
            (when callback (funcall callback proc) (setq callback nil))))
        (connected (proc)
@@ -571,31 +571,31 @@ handshake with a non-nil argument indicating success."
              (process-send-string proc "\0\0\0\0") ; Zero-length heartbeat
            (unless (eq (char-after) 112) (err "Type is not pass through"))
            (forward-char)
-           (let ((ctl (progn (or (eq (char-after) derl-ext-version) (err "Bad version"))
+           (let ((ctl (progn (or (eq (char-after) earl-ext-version) (err "Bad version"))
                              (forward-char)
-                             (derl-read)))
+                             (earl-read)))
                  (msg (unless (eobp)
-                        (or (eq (char-after) derl-ext-version) (err "Bad version"))
+                        (or (eq (char-after) earl-ext-version) (err "Bad version"))
                         (forward-char)
-                        (derl-read))))
+                        (earl-read))))
              (pcase-exhaustive ctl
                (`[1 ,from [,_ pid nil ,to ,_ ,_]] ; LINK
-                (when-let ((process (gethash to derl--processes))
-                           ((null (assoc from (derl--process-links process)))))
-                  (push (list from) (derl--process-links process))))
+                (when-let ((process (gethash to earl--processes))
+                           ((null (assoc from (earl--process-links process)))))
+                  (push (list from) (earl--process-links process))))
                (`[22 ,_from ,to] (! to msg)) ; SEND_SENDER
                (`[,(or (and 3 (let link t)) 8) ,from ,to ,reason] ; EXIT/EXIT2
-                (derl-exit to reason link from))
+                (earl-exit to reason link from))
                (`[6 ,_from ,_ ,to] (! to msg)) ; REG_SEND
                (`[35 ,id ,from ,(and to `[,_ pid nil ,to-id ,_ ,_])] ; UNLINK_ID
-                (when-let ((process (gethash to-id derl--processes))
-                           (link (assoc from (derl--process-links process)))
+                (when-let ((process (gethash to-id earl--processes))
+                           (link (assoc from (earl--process-links process)))
                            ((null (cdr link)))) ; No outstanding unlink operation
-                  (cl-callf2 assoc-delete-all from (derl--process-links process)))
-                (derl--send-control-msg proc `[36 ,id ,to ,from])) ; UNLINK_ID_ACC
+                  (cl-callf2 assoc-delete-all from (earl--process-links process)))
+                (earl--send-control-msg proc `[36 ,id ,to ,from])) ; UNLINK_ID_ACC
                (`[36 ,id ,from [,_ pid nil ,to-id ,_ ,_]] ; UNLINK_ID_ACC
-                (when-let ((process (gethash to-id derl--processes)))
-                  (cl-callf2 delete (cons from id) (derl--process-links process))))))))
+                (when-let ((process (gethash to-id earl--processes)))
+                  (cl-callf2 delete (cons from id) (earl--process-links process))))))))
        (filter (proc string)
          (with-current-buffer (process-buffer proc)
            (insert string)
@@ -603,8 +603,8 @@ handshake with a non-nil argument indicating success."
            (let (lenlen len)
              (while (and (<= (setq lenlen (if (eq (process-get proc 'filter) #'connected) 4 2))
                              (buffer-size))
-                         (<= (setq len (+ lenlen (if (= lenlen 4) (derl--read-uint 4)
-                                                   (derl--read-uint 2))))
+                         (<= (setq len (+ lenlen (if (= lenlen 4) (earl--read-uint 4)
+                                                   (earl--read-uint 2))))
                              (buffer-size)))
                (save-restriction
                  (narrow-to-region (point) (+ (point-min) len))
@@ -616,17 +616,17 @@ handshake with a non-nil argument indicating success."
          (unless (process-live-p proc)
            (kill-buffer (process-buffer proc))
            (when-let (name (process-get proc 'name))
-             (remhash name derl--connections)
-             (remhash (process-get proc 'name-b) derl--connections))
+             (remhash name earl--connections)
+             (remhash (process-get proc 'name-b) earl--connections))
            (when callback (funcall callback nil)))))
-    (let* ((buf (generate-new-buffer " *derl recv*" t))
+    (let* ((buf (generate-new-buffer " *earl recv*" t))
            (proc (make-network-process
-                  :name (format "derl-%s:%s" host port) :host host :service port
+                  :name (format "earl-%s:%s" host port) :host host :service port
                   :coding 'binary :filter #'filter :sentinel #'sentinel
                   :buffer buf :plist (list 'filter #'recv-status)))
            (flags
             (eval-when-compile
-              (derl--uint-string
+              (earl--uint-string
                8 (logior
                   #x4 ; DFLAG_EXTENDED_REFERENCES
                   #x10 ; DFLAG_FUN_TAGS
@@ -648,17 +648,17 @@ handshake with a non-nil argument indicating success."
       (with-current-buffer buf (set-buffer-multibyte nil))
       ;; Send send_name message
       (process-send-string
-       proc (concat (derl--uint-string 2 (+ 15 (string-bytes name))) ; Length
+       proc (concat (earl--uint-string 2 (+ 15 (string-bytes name))) ; Length
                     [?N] ; send_name tag
                     flags
                     [0 0 0 0] ; Creation
-                    (derl--uint-string 2 (string-bytes name)) ; Nlen
+                    (earl--uint-string 2 (string-bytes name)) ; Nlen
                     name))
       proc)))
 
-(defun derl--ensure-connection (node)
+(defun earl--ensure-connection (node)
   "Block until a connection to NODE is established and return the network process."
-  (if-let (conn (gethash node derl--connections)) conn
+  (if-let (conn (gethash node earl--connections)) conn
     (message "Connecting to `%s'..." node)
     (let* ((node-string (symbol-name node))
            (name (if (string-match "\\`\\([^@]+\\)@\\([^@]+\\)\\'" node-string)
@@ -666,23 +666,23 @@ handshake with a non-nil argument indicating success."
            (host (match-string 2 node-string))
            result donep
            (callback (lambda (successp) (setq result successp donep t)))
-           (proc (derl-connect host (derl-epmd-port-please name host) (derl-cookie)
+           (proc (earl-connect host (earl-epmd-port-please name host) (earl-cookie)
                                :callback callback)))
       (while (and (accept-process-output proc 1) (not donep)))
       (when result proc))))
 
-(defun derl--send-control-msg (conn control-msg &optional msg)
+(defun earl--send-control-msg (conn control-msg &optional msg)
   (with-temp-buffer
     (set-buffer-multibyte nil)
-    (insert 112 derl-ext-version) ; Pass through
-    (let ((derl--write-connection conn))
-      (derl-write control-msg)
-      (when msg (insert derl-ext-version) (derl-write msg)))
+    (insert 112 earl-ext-version) ; Pass through
+    (let ((earl--write-connection conn))
+      (earl-write control-msg)
+      (when msg (insert earl-ext-version) (earl-write msg)))
     (goto-char (point-min))
-    (insert (derl--uint-string 4 (buffer-size)))
+    (insert (earl--uint-string 4 (buffer-size)))
     (process-send-region conn (point-min) (point-max))))
 
-(defun derl-cookie ()
+(defun earl-cookie ()
   "Return the default cookie the local node will use, if such exists."
   (let (file)
     (when (or (file-exists-p (setq file "~/.erlang.cookie"))
@@ -692,40 +692,40 @@ handshake with a non-nil argument indicating success."
       (with-temp-buffer (insert-file-contents-literally file)
                         (buffer-string)))))
 
-(iter-defun derl-rpc (node module function args)
+(iter-defun earl-rpc (node module function args)
   "Apply FUNCTION in MODULE to ARGS on the remote NODE."
   (! `(rex . ,node)
      ;; {Who, {call, M, F, A, GroupLeader}}
-     `[,(derl-self) [call ,module ,function ,args user]])
-  (derl-receive (`[rex ,x] x)))
+     `[,(earl-self) [call ,module ,function ,args user]])
+  (earl-receive (`[rex ,x] x)))
 
-(defun derl-do (gen)
+(defun earl-do (gen)
   "Like `iter-yield-from' for contexts callable only from the main process."
-  (iter-do (_ gen) (derl--run)))
+  (iter-do (_ gen) (earl--run)))
 
-(iter-defun derl-call (fun &optional timeout)
+(iter-defun earl-call (fun &optional timeout)
   "Delegate to generator FUN with TIMEOUT, dropping any laggard messages."
-  (let* ((self (derl-self))
-         (ref (derl-make-ref))
-         (pid (derl-spawn
+  (let* ((self (earl-self))
+         (ref (earl-make-ref))
+         (pid (earl-spawn
                (lambda (op value)
                  (condition-case err (funcall fun op value)
                    (iter-end-of-sequence (! self (cons ref (cdr err)))
                                          (signal (car err) (cdr err)))))))
          (yielded nil))
     (unwind-protect
-        (prog1 (derl-receive
+        (prog1 (earl-receive
                 (`(,(pred (equal ref)) . ,x) x)
-                :after (or timeout 5) (progn (derl-exit pid 'kill) 'timeout))
+                :after (or timeout 5) (progn (earl-exit pid 'kill) 'timeout))
           (setq yielded t))
       (unless yielded
-        (derl-exit pid 'kill)
-        (cl-callf2 assoc-delete-all ref (derl--process-mailbox derl--self))))))
+        (earl-exit pid 'kill)
+        (cl-callf2 assoc-delete-all ref (earl--process-mailbox earl--self))))))
 
-(provide 'derl)
+(provide 'earl)
 
 ;; Local Variables:
-;; read-symbol-shorthands: (("!" . "derl-send"))
+;; read-symbol-shorthands: (("!" . "earl-send"))
 ;; End:
 
-;;; derl.el ends here
+;;; earl.el ends here

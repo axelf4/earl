@@ -1,6 +1,6 @@
-# derl
+# earl
 
-Derl is an Emacs Lisp library for communicating with Erlang nodes,
+Earl is an Emacs Lisp library for communicating with Erlang nodes,
 that provides an Erlang-like process concurrency abstraction.
 In other words, it is full rewrite of the library part of [Distel],
 differing in the following ways:
